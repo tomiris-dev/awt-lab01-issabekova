@@ -85,3 +85,95 @@ In this lab, I styled the course catalog using Tailwind CSS and shadcn/ui. The U
 - Added system-based dark mode support using Tailwind's `dark:` prefix
 - Updated `CourseCard`, `NavBar`, and all pages (`/`, `/about`, `/courses/[id]`) for proper contrast and readability in dark theme
 - Improved hover effects specifically for dark mode (`dark:hover:bg-slate-800`, `dark:hover:border-blue-500`, `dark:hover:shadow-blue-500/20`)
+
+## Laboratory work 5
+Next.js frontend for the course catalog. Data and actions come from the FastAPI backend (see `course-catalog-api`).
+
+## Running the project
+
+**Order matters:** start the backend first, then the frontend. If the backend is not running, `/courses` will show the error page.
+
+### Backend (`course-catalog-api`)
+
+```bash
+cd course-catalog-api
+source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
+fastapi dev main.py
+```
+
+The API is available at `http://localhost:8000`.
+
+### Frontend (this project)
+
+```bash
+cd course-catalog
+npm install
+npm run dev
+```
+
+The app is available at `http://localhost:3000`. Only this origin is allowed by the backend; if port 3000 is busy and Next.js picks 3001, requests will be blocked by CORS.
+
+## Environment variables
+
+Create a file `.env.local` in the project root (next to `package.json`). It is ignored by git.
+
+```
+API_URL=http://localhost:8000
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+- `API_URL` - visible only to server-side code (Server Components, Route Handlers). Used by `getCourses` and `getCourse` in `lib/courses.ts`.
+- `NEXT_PUBLIC_API_URL` - embedded into the JavaScript bundle sent to the browser. Used by the Client Components (`ElectiveFilter`, `LikeButton`, `EnrollForm`). **Never put secrets here.**
+
+After creating or editing `.env.local`, restart `npm run dev`.
+
+## Breakage journal
+
+The experiments follow the algorithm from section 7 of Lecture 5: first check the Network tab and the status, then the response headers, then the preflight, and only at the end the backend terminal.
+
+### Breakage 1: CORS removed entirely
+
+- **What I did:** commented out the whole `app.add_middleware(CORSMiddleware, ...)` block in `main.py`.
+- **Console (on `/filter`):** `Access to fetch at 'http://localhost:8000/courses' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.`
+- **Network:** the `courses` request is red, marked as CORS error, even though the backend log says `200 OK`. The enrollment form's preflight `OPTIONS /enrollments` returns `405` and the POST is never sent.
+- **Cause:** CORS is not connected, so the browser does not receive permission to read the response.
+- **How I found it:** step 3 of the algorithm — there is no `access-control-allow-origin` header in the response. Two side observations: the server still executed the request (the log shows 200 OK), and `/courses` (whose request is sent by the Next.js server) still works — Server Component requests are not affected by CORS.
+
+### Breakage 2: Trailing slash in `allow_origins`
+
+- **What I did:** changed `allow_origins=["http://localhost:3000"]` to `allow_origins=["http://localhost:3000/"]`.
+- **Console (on `/filter`):** same message as in breakage 1.
+- **Network:** the enrollment form's preflight `OPTIONS /enrollments` returns `400`, the POST is not sent. Console: `Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.`
+- **Cause:** the value `"http://localhost:3000/"` matches no origin, so permission is granted to nobody.
+- **How I found it:** step 3 of the algorithm — the value in `access-control-allow-origin` never matches the page's origin character for character. Fixed by removing the slash.
+
+### Breakage 3: `allow_methods` removed
+
+- **What I did:** deleted the `allow_methods=["*"]` line from `app.add_middleware(...)`.
+- **Console (on `/filter`):** same message as in breakage 1. The form's `OPTIONS /enrollments` returns `400`.
+- **Network:** `/filter` and the like button work. The enrollment form's preflight returns `400`, POST is not sent. Console: `Response to preflight request doesn't pass access control check: It does not have HTTP ok status.` In the preflight response there is `access-control-allow-origin` but `access-control-allow-methods: GET` only.
+- **Cause:** only GET is allowed by default; the POST method is rejected. The origin is fine — what needs fixing is the methods.
+- **How I found it:** step 4 of the algorithm — the preflight returned 400; the response headers show the method list is wrong.
+
+### Breakage 4: Different origin — `127.0.0.1` instead of `localhost`
+
+- **What I did:** opened the frontend at `http://127.0.0.1:3000/filter` instead of `http://localhost:3000/filter`. Added `allowedDevOrigins: ["127.0.0.1"]` to `next.config.ts` and restarted `npm run dev`.
+- **Console:** `Access to fetch at 'http://localhost:8000/courses' from origin 'http://127.0.0.1:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.`
+- **Network:** `courses` is red, the backend log says `200 OK`.
+- **Cause:** to the browser, `localhost` and `127.0.0.1` are different hosts, and so different origins. Only `http://localhost:3000` is allowed.
+- **How I found it:** step 3 of the algorithm — the `Origin` header in the request does not match the value in `allow_origins`. Fixed by opening the page at the address from the list, or by adding a second address to `allow_origins`.
+
+### Breakage 5: Python error that pretends to be CORS
+
+- **What I did:** in `main.py`, renamed the `"offset"` key in the `pagination` function to `"offest"` (a typo), so `p["offset"]` in `list_courses` raises `KeyError: 'offset'`.
+- **Console (on `/filter`):** `Access to fetch at 'http://localhost:8000/courses' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.` -  looks exactly like breakage 1.
+- **Network:** the `courses` request is red. The like and enrollment routes work as before (their routes are untouched). `/courses` shows `error.tsx`.
+- **Backend terminal:** status `500 Internal Server Error`, Python traceback ending with `KeyError: 'offset'`.
+- **Cause:** an unhandled exception in a route becomes a 500 response, and that response is produced by a layer outside `CORSMiddleware` - so it has no `access-control-*` headers. The browser sees a response without permission and shows the same CORS error.
+- **How I found it:** steps 1 and 5 of the algorithm - `/courses` also broke, but it does not use CORS at all, so the cause cannot be CORS. The backend terminal shows the real 500 and the traceback.
+
+## Decisions
+
+**Why `generateStaticParams` was removed from `app/courses/[id]/page.tsx`.** In Lab 1 the course list was a mock array inside the frontend, and pre-building course pages was reasonable. Now the data lives in the backend and changes without rebuilding the frontend, so a page built at `next build` time would show stale data. More importantly, `generateStaticParams` calls `getCourses()` during the build, and the build fails with `ECONNREFUSED` if the backend is not running at that moment. Removing it lets the pages be dynamic (`f` in the build table) and keeps `npm run build` green even with the backend stopped. The Lab 1 criterion about `generateStaticParams` is still considered met — it was implemented when the data was mocked and deliberately removed once the data moved to the backend.
+
+**Why the like does not need a preflight but the enrollment does.** A browser only sends a preflight (`OPTIONS`) for requests that go beyond the "simple" kind. The like is a `POST` with no body and no extra headers, so it stays simple. The enrollment form sends `Content-Type: application/json`, which is not a "simple" content type, so the browser first asks the server for permission with `OPTIONS`, gets `access-control-allow-methods` and `access-control-allow-headers` back, and only then sends the actual POST. If the `Content-Type: application/json` header were omitted, the request would silently become simple, the preflight would disappear, and FastAPI would answer `422 Input should be a valid dictionary or object...` because it would receive the body as `text/plain`.
