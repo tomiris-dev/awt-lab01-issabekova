@@ -1,15 +1,10 @@
 import { notFound } from "next/navigation";
-import { getCourse, getCourses } from "@/lib/courses";
+import { getCourse } from "@/lib/courses";
 import LikeButton from "@/components/LikeButton";
 
 type CoursePageProps = {
   params: Promise<{ id: string }>;
 };
-
-export async function generateStaticParams() {
-  const courses = await getCourses();
-  return courses.map((course) => ({ id: course.id }));
-}
 
 export default async function CoursePage({ params }: CoursePageProps) {
   const { id } = await params;
