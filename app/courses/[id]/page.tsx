@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { getCourse } from "@/lib/courses";
 import LikeButton from "@/components/LikeButton";
+import EnrollForm from "@/components/EnrollForm";
 
 type CoursePageProps = {
   params: Promise<{ id: string }>;
@@ -21,7 +22,8 @@ export default async function CoursePage({ params }: CoursePageProps) {
       <p className="mb-6 text-sm text-gray-500 dark:text-gray-400">
         {course.credits} credits · {course.isElective ? "Elective" : "Core"}
       </p>
-      <LikeButton initialLikes={course.likes} />
+      <LikeButton courseId={course.id} initialLikes={course.likes} />
+      <EnrollForm courseId={course.id} />
     </main>
   );
 }
